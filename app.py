@@ -111,6 +111,10 @@ def _serializable_state():
 
 @app.route("/")
 def index():
+    # Force a fresh session on every page load so each visitor starts clean
+    old_sid = session.pop("sid", None)
+    if old_sid:
+        _sessions.pop(old_sid, None)
     return send_from_directory(STATIC_DIR, "index.html")
 
 
