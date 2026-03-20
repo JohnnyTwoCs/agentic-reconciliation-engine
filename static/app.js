@@ -1202,6 +1202,8 @@ function toggleChat() {
   chatOpen = !chatOpen;
   document.getElementById('chatWindow').classList.toggle('hidden', !chatOpen);
   document.getElementById('chatToggle').classList.toggle('open', chatOpen);
+  document.getElementById('chatWidget').classList.toggle('chat-open', chatOpen);
+  document.body.classList.toggle('chat-open-mobile', chatOpen);
   if (chatOpen) {
     chatUnreadCount = 0;
     document.getElementById('chatUnread').classList.add('hidden');
