@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agentic Reconciliation Engine — Ledger.AI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="header-left">
+    <div class="logo">
+      <span class="logo-bars"><span></span><span></span><span></span><span class="accent-bar"></span></span>
+      <span class="logo-text">Ledger<span class="accent">.AI</span></span>
+    </div>
+    <div class="header-title">
+      <h1>Agentic Reconciliation Engine</h1>
+      <p class="subtitle">Governed automation for bank reconciliation — NovaTech Solutions, March 2026</p>
+    </div>
+  </div>
+  <div class="header-badges">
+    <div class="badge"><span class="badge-value" id="badgeMatchRate">0%</span><span class="badge-label">Match Rate</span></div>
+    <div class="badge" id="badgeVarianceWrap"><span class="badge-value" id="badgeVariance">—</span><span class="badge-label">Variance</span></div>
+    <div class="badge badge-warn"><span class="badge-value" id="badgeExceptions">0</span><span class="badge-label">Exceptions</span></div>
+  </div>
+</header>
+
+<!-- Control Bar -->
+<div class="control-bar">
+  <div class="controls">
+    <button class="btn btn-primary" id="btnRunAll" onclick="runFullReconciliation()">Run Full Recon</button>
+    <button class="btn btn-secondary" id="btnStep" onclick="stepThrough()">Step Through</button>
+    <button class="btn btn-secondary" id="btnBulkApprove" onclick="bulkApproveAll()" disabled>Approve All Pending</button>
+    <div class="export-dropdown" id="exportDropdown">
+      <button class="btn btn-secondary" id="btnExport" onclick="toggleExportMenu()" disabled>Export Report &#9662;</button>
+      <div class="export-menu hidden" id="exportMenu">
+        <button class="export-item" onclick="exportReport()">HTML Report</button>
+        <button class="export-item" onclick="exportCSV()">CSV Data (Excel)</button>
+      </div>
+    </div>
+    <button class="btn btn-ghost" id="btnReset" onclick="resetDemo()">Reset</button>
+  </div>
+  <div class="progress-container">
+    <div class="progress-label"><span id="progressText">Ready to reconcile</span><span id="progressPct">0%</span></div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+  </div>
+</div>
+
+<!-- Welcome Card -->
+<div class="welcome-card" id="welcomeCard">
+  <div class="welcome-inner">
+    <h2>Agentic Reconciliation Engine</h2>
+    <p class="welcome-desc">This demo reconciles <strong>40 bank transactions</strong> against <strong>44 GL entries</strong> for NovaTech Solutions (March 2026) using a 6-rule AI matching engine.</p>
+    <div class="welcome-steps">
+      <div class="welcome-step"><span class="welcome-num">1</span>Click <strong>Run Full Recon</strong> or <strong>Step Through</strong> to start matching</div>
+      <div class="welcome-step"><span class="welcome-num">2</span>Review matches in the <strong>Match Explorer</strong> — approve or reject</div>
+      <div class="welcome-step"><span class="welcome-num">3</span>Resolve outstanding items to reach <strong>$0 variance</strong></div>
+      <div class="welcome-step"><span class="welcome-num">4</span><strong>Export</strong> the final report with journal entries</div>
+    </div>
+    <button class="btn btn-primary" onclick="dismissWelcome()">Get Started</button>
+  </div>
+</div>
+
+<!-- Progress Tracker -->
+<div class="progress-tracker" id="progressTracker">
+  <div class="tracker-step active" id="trackerStep1" onclick="trackerNavigate('matching')"><span class="tracker-dot"></span><span class="tracker-label">Matching</span><span class="tracker-count" id="trackerCount1"></span></div>
+  <div class="tracker-line" id="trackerLine1"></div>
+  <div class="tracker-step" id="trackerStep2" onclick="trackerNavigate('review')"><span class="tracker-dot"></span><span class="tracker-label">Review</span><span class="tracker-count" id="trackerCount2"></span></div>
+  <div class="tracker-line" id="trackerLine2"></div>
+  <div class="tracker-step" id="trackerStep3" onclick="trackerNavigate('resolve')"><span class="tracker-dot"></span><span class="tracker-label">Resolve</span><span class="tracker-count" id="trackerCount3"></span></div>
+  <div class="tracker-line" id="trackerLine3"></div>
+  <div class="tracker-step" id="trackerStep4" onclick="trackerNavigate('complete')"><span class="tracker-dot"></span><span class="tracker-label">Complete</span><span class="tracker-count" id="trackerCount4"></span></div>
+  <div class="export-dropdown" id="trackerExportDropdown">
+    <button class="btn btn-primary tracker-export-btn" id="trackerExportBtn" onclick="toggleTrackerExport()" disabled>Export Final Report &#9662;</button>
+    <div class="export-menu hidden" id="trackerExportMenu">
+      <button class="export-item" onclick="exportReport()">HTML Report</button>
+      <button class="export-item" onclick="exportCSV()">CSV Data (Excel)</button>
+    </div>
+  </div>
+</div>
+
+<!-- Main Content -->
+<main class="main-grid">
+  <!-- Left: Transaction Tables -->
+  <section class="panel transactions-panel">
+    <div class="panel-header">
+      <div class="tabs">
+        <button class="tab active" data-tab="bank" onclick="switchTab('bank',this)">Bank Statement</button>
+        <button class="tab" data-tab="gl" onclick="switchTab('gl',this)">General Ledger</button>
+        <button class="tab" data-tab="all" onclick="switchTab('all',this)">Match Explorer</button>
+      </div>
+      <span class="count-label" id="tableCount"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table" id="bankTable">
+        <thead><tr>
+          <th>ID</th><th>Date</th><th>Type</th><th>Description</th>
+          <th class="num">Amount</th><th>Check #</th><th>Ref</th><th>Status</th>
+        </tr></thead>
+        <tbody id="bankBody"></tbody>
+      </table>
+      <table class="data-table hidden" id="glTable">
+        <thead><tr>
+          <th>ID</th><th>Post Date</th><th>Eff Date</th><th>Description</th>
+          <th class="num">Debit</th><th class="num">Credit</th><th>Account</th><th>JE Ref</th><th>Status</th>
+        </tr></thead>
+        <tbody id="glBody"></tbody>
+      </table>
+      <div class="match-explorer hidden" id="matchExplorer">
+        <div class="match-explorer-filters">
+          <button class="filter-btn active" data-filter="all" onclick="filterMatchExplorer('all')">All</button>
+          <button class="filter-btn" data-filter="exceptions" onclick="filterMatchExplorer('exceptions')">Exceptions</button>
+          <button class="filter-btn" data-filter="pending" onclick="filterMatchExplorer('pending')">Pending Review</button>
+          <button class="filter-btn" data-filter="auto" onclick="filterMatchExplorer('auto')">Auto-Approved</button>
+          <button class="filter-btn" data-filter="unmatched" onclick="filterMatchExplorer('unmatched')">Unmatched</button>
+        </div>
+        <div class="match-explorer-scroll" id="matchExplorerScroll">
+          <div class="feed-empty">Run reconciliation to see matched pairs here.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Right: Tabbed Panel (Review + Activity) -->
+  <section class="panel right-panel">
+    <div class="panel-header right-tabs-header">
+      <div class="tabs right-tabs">
+        <button class="tab active" data-rtab="review" onclick="switchRightTab('review',this)">Match Review</button>
+        <button class="tab" data-rtab="activity" onclick="switchRightTab('activity',this)">
+          AI Agent Activity <span class="status-dot" id="agentStatus"></span>
+        </button>
+      </div>
+    </div>
+    <div class="right-tab-content">
+      <div class="right-tab-pane active" id="rightTabReview">
+        <div id="reviewContent">
+          <div class="review-empty">Select a transaction or match card to review details.</div>
+        </div>
+      </div>
+      <div class="right-tab-pane" id="rightTabActivity">
+        <div class="feed-scroll" id="feedScroll">
+          <div class="feed-empty">Agent standing by. Click <strong>Step Through</strong> or <strong>Run Full Recon</strong> to begin.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- Rec Report Panel (collapsible, below match explorer) -->
+<section class="rec-report" id="recReport">
+  <div class="rec-header" onclick="toggleRecReport()">
+    <h2>Bank Reconciliation Report</h2>
+    <span class="rec-toggle" id="recToggle">&#9660;</span>
+  </div>
+  <div class="rec-body" id="recBody">
+    <div class="rec-columns">
+      <div class="rec-side">
+        <h3>Bank Side</h3>
+        <table class="rec-table">
+          <tr><td>Statement Ending Balance</td><td class="amt" id="recBankEnding">—</td></tr>
+          <tr class="rec-section"><td colspan="2">Add: Deposits in Transit</td></tr>
+          <tbody id="recDIT"></tbody>
+          <tr class="rec-subtotal"><td>Subtotal</td><td class="amt" id="recDITTotal">—</td></tr>
+          <tr class="rec-section"><td colspan="2">Less: Outstanding Checks</td></tr>
+          <tbody id="recOC"></tbody>
+          <tr class="rec-subtotal"><td>Subtotal</td><td class="amt" id="recOCTotal">—</td></tr>
+          <tr class="rec-total"><td>Adjusted Bank Balance</td><td class="amt" id="recAdjBank">—</td></tr>
+        </table>
+      </div>
+      <div class="rec-side">
+        <h3>Book Side</h3>
+        <table class="rec-table">
+          <tr><td>GL Cash Balance (Acct 1000)</td><td class="amt" id="recBookBal">—</td></tr>
+          <tr><td>Add: Interest Income</td><td class="amt" id="recInterest">—</td></tr>
+          <tr><td>Less: Bank Fees & Charges</td><td class="amt" id="recFees">—</td></tr>
+          <tr><td>Less: NSF Charges</td><td class="amt" id="recNSF">—</td></tr>
+          <tr class="rec-total"><td>Adjusted Book Balance</td><td class="amt" id="recAdjBook">—</td></tr>
+        </table>
+      </div>
+    </div>
+    <div class="rec-variance" id="recVariance">—</div>
+  </div>
+</section>
+
+<!-- Dashboard -->
+<section class="dashboard hidden" id="dashboard">
+  <h2 class="section-title">Reconciliation Dashboard</h2>
+  <div class="kpi-cards" id="kpiCards">
+    <div class="kpi-card"><div class="kpi-value" id="kpiMatched">—</div><div class="kpi-label">Matched</div><div class="kpi-sub" id="kpiMatchedSub"></div></div>
+    <div class="kpi-card"><div class="kpi-value kpi-green" id="kpiAutoApproved">—</div><div class="kpi-label">Auto-Approved</div><div class="kpi-sub">No human review needed</div></div>
+    <div class="kpi-card"><div class="kpi-value kpi-yellow" id="kpiNeedsReview">—</div><div class="kpi-label">Needs Review</div><div class="kpi-sub">Pending + exceptions</div></div>
+    <div class="kpi-card"><div class="kpi-value kpi-accent" id="kpiTimeSaved">—</div><div class="kpi-label">Est. Time Saved</div><div class="kpi-sub">vs. manual reconciliation</div></div>
+  </div>
+  <div class="dashboard-grid">
+    <!-- Donut -->
+    <div class="panel donut-panel">
+      <h3>Match Breakdown by Rule</h3>
+      <div class="donut-container"><div class="donut" id="donut"></div><div class="donut-center" id="donutCenter">0</div></div>
+      <div class="donut-legend" id="donutLegend"></div>
+    </div>
+    <!-- Reconciling Items -->
+    <div class="panel recon-items-panel">
+      <h3>Reconciling Items</h3>
+      <div class="recon-items-list" id="reconItemsList"></div>
+    </div>
+    <!-- Audit Log -->
+    <div class="panel audit-panel">
+      <h3>Audit Trail <span class="count-badge" id="auditCount">0</span></h3>
+      <div class="audit-list" id="auditList">
+        <div class="feed-empty">No activity yet.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Journal Entries Report (appears after resolutions) -->
+<section class="je-report" id="jeReport">
+  <div class="je-header" onclick="toggleJEReport()">
+    <h2>Adjusting Journal Entries <span class="count-badge" id="jeCount">0</span></h2>
+    <span class="rec-toggle" id="jeToggle">&#9660;</span>
+  </div>
+  <div class="je-body" id="jeBody">
+    <table class="je-table">
+      <thead><tr><th>JE Ref</th><th>Date</th><th>Debit Account</th><th>Credit Account</th><th class="num">Amount</th><th>Memo</th><th></th></tr></thead>
+      <tbody id="jeTableBody"></tbody>
+      <tfoot id="jeTableFoot"></tfoot>
+    </table>
+    <div class="je-summary" id="jeSummary"></div>
+  </div>
+</section>
+
+<!-- Manual Match Floating Bar -->
+<div class="manual-match-bar hidden" id="manualMatchBar">
+  <div class="manual-match-info">
+    <span class="manual-match-label">Manual Match Mode</span>
+    <span id="manualMatchSummary">Select bank and GL items from the Needs Attention section</span>
+  </div>
+  <div class="manual-match-actions">
+    <button class="btn btn-primary" id="btnCreateManualMatch" onclick="submitManualMatch()" disabled>Create Match</button>
+    <button class="btn btn-ghost" onclick="toggleManualMatchMode()">Cancel</button>
+  </div>
+</div>
+
+<!-- Resolution Modal -->
+<div class="modal-overlay hidden" id="resolveModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="resolveTitle">Resolve Item</h3>
+      <button class="btn-close" onclick="closeResolveModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="resolveModalBody"></div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" id="btnSubmitResolve" onclick="submitResolution()">Create Journal Entry</button>
+      <button class="btn btn-ghost" onclick="closeResolveModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Agent Chat Bubble -->
+<div class="chat-widget" id="chatWidget">
+  <div class="chat-window hidden" id="chatWindow">
+    <div class="chat-header">
+      <div class="chat-header-info">
+        <span class="chat-avatar">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z"/><path d="M16 14H8a4 4 0 0 0-4 4v2h16v-2a4 4 0 0 0-4-4z"/></svg>
+        </span>
+        <div>
+          <div class="chat-title">Recon Agent</div>
+          <div class="chat-status" id="chatAgentStatus">Ready</div>
+        </div>
+      </div>
+      <button class="chat-close" onclick="toggleChat()">&times;</button>
+    </div>
+    <div class="chat-messages" id="chatMessages">
+      <div class="chat-msg chat-msg-ai">
+        <div class="chat-msg-avatar">AI</div>
+        <div class="chat-msg-bubble">Hey! I'm your reconciliation agent. Click <strong>Step Through</strong> or <strong>Run Full Recon</strong> and I'll walk you through exactly what I'm doing and why. You can also ask me questions about any transaction or match.</div>
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <form onsubmit="handleChatSubmit(event)">
+        <input type="text" class="chat-input" id="chatInput" placeholder="Ask about a transaction, match, or anomaly..." autocomplete="off">
+        <button type="submit" class="chat-send">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </form>
+    </div>
+  </div>
+  <button class="chat-toggle" id="chatToggle" onclick="toggleChat()">
+    <svg class="chat-icon-open" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+    <svg class="chat-icon-close hidden" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    <span class="chat-unread hidden" id="chatUnread">0</span>
+  </button>
+</div>
+
+<!-- Footer -->
+<footer class="footer">
+  <p>Built by <strong>Jon Roth</strong> — Ledger.AI &middot; Governed Automation Demo</p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
