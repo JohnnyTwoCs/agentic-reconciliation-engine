@@ -14,14 +14,16 @@ import csv
 import io
 import os
 import sys
+import uuid
 import webbrowser
+from collections import OrderedDict
 from datetime import datetime
 from threading import Timer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from flask import Flask, jsonify, request, send_from_directory, Response
+    from flask import Flask, jsonify, request, send_from_directory, Response, session
 except ImportError:
     print("Flask is required. Install it with: pip install flask")
     sys.exit(1)
@@ -31,10 +33,12 @@ from engine import reconcile_all, reconcile_step, apply_approval_tiers, build_re
 from config import CHART_OF_ACCOUNTS
 
 app = Flask(__name__, static_folder="static")
+app.secret_key = os.environ.get("SECRET_KEY", "recon-engine-demo-" + uuid.uuid4().hex[:16])
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
-# ── In-memory state ────────────────────────────────────────────────────
-_initial_data = generate_dataset()
+# ── Per-session in-memory state ───────────────────────────────────────
+MAX_SESSIONS = 200
+_sessions = OrderedDict()
 
 
 def _fresh_state():
@@ -53,39 +57,53 @@ def _fresh_state():
     }
 
 
-_state = _fresh_state()
+def _get_state():
+    """Get or create per-session state. LRU eviction keeps memory bounded."""
+    sid = session.get("sid")
+    if not sid:
+        sid = uuid.uuid4().hex
+        session["sid"] = sid
+    if sid in _sessions:
+        _sessions.move_to_end(sid)
+        return _sessions[sid]
+    while len(_sessions) >= MAX_SESSIONS:
+        _sessions.popitem(last=False)
+    _sessions[sid] = _fresh_state()
+    return _sessions[sid]
 
 
 def _rebuild_rec_report():
     """Rebuild rec report from current state (after approve/reject)."""
-    d = _state["data"]
-    _state["rec_report"] = build_rec_report(
+    st = _get_state()
+    d = st["data"]
+    st["rec_report"] = build_rec_report(
         d["bank_statement"], d["book_balance"],
         d["bank_transactions"], d["gl_entries"],
-        _state["matches"], _state["matched_bank"], _state["matched_gl"],
+        st["matches"], st["matched_bank"], st["matched_gl"],
     )
-    _state["summary"] = build_summary(
+    st["summary"] = build_summary(
         d["bank_transactions"], d["gl_entries"],
-        _state["matches"], _state["matched_bank"], _state["matched_gl"],
-        _state["rec_report"],
+        st["matches"], st["matched_bank"], st["matched_gl"],
+        st["rec_report"],
     )
 
 
 def _serializable_state():
     """Return JSON-safe version of current state."""
+    st = _get_state()
     return {
-        "bank_transactions": _state["data"]["bank_transactions"],
-        "gl_entries": _state["data"]["gl_entries"],
-        "bank_statement": _state["data"]["bank_statement"],
-        "book_balance": _state["data"]["book_balance"],
-        "matches": _state["matches"],
-        "matched_bank": list(_state["matched_bank"]),
-        "matched_gl": list(_state["matched_gl"]),
-        "rec_report": _state["rec_report"],
-        "audit_log": _state["audit_log"],
-        "current_step": _state["current_step"],
-        "summary": _state["summary"],
-        "resolutions": _state["resolutions"],
+        "bank_transactions": st["data"]["bank_transactions"],
+        "gl_entries": st["data"]["gl_entries"],
+        "bank_statement": st["data"]["bank_statement"],
+        "book_balance": st["data"]["book_balance"],
+        "matches": st["matches"],
+        "matched_bank": list(st["matched_bank"]),
+        "matched_gl": list(st["matched_gl"]),
+        "rec_report": st["rec_report"],
+        "audit_log": st["audit_log"],
+        "current_step": st["current_step"],
+        "summary": st["summary"],
+        "resolutions": st["resolutions"],
     }
 
 
@@ -104,14 +122,15 @@ def api_data():
 @app.route("/api/reconcile", methods=["POST"])
 def api_reconcile():
     """Run full reconciliation."""
-    result = reconcile_all(_state["data"])
-    _state["matches"] = result["matches"]
-    _state["matched_bank"] = set(result["matched_bank"])
-    _state["matched_gl"] = set(result["matched_gl"])
-    _state["rec_report"] = result["rec_report"]
-    _state["summary"] = result["summary"]
-    _state["audit_log"] = result["audit_log"]
-    _state["current_step"] = 5
+    st = _get_state()
+    result = reconcile_all(st["data"])
+    st["matches"] = result["matches"]
+    st["matched_bank"] = set(result["matched_bank"])
+    st["matched_gl"] = set(result["matched_gl"])
+    st["rec_report"] = result["rec_report"]
+    st["summary"] = result["summary"]
+    st["audit_log"] = result["audit_log"]
+    st["current_step"] = 5
     return jsonify({
         "matches": result["matches"],
         "matched_bank": result["matched_bank"],
@@ -125,27 +144,28 @@ def api_reconcile():
 @app.route("/api/reconcile/step", methods=["POST"])
 def api_reconcile_step():
     """Run one reconciliation step (1-5)."""
-    next_step = _state["current_step"] + 1
+    st = _get_state()
+    next_step = st["current_step"] + 1
     if next_step > 5:
         return jsonify({"error": "All steps complete. Reset to start over.", "done": True})
 
     result = reconcile_step(
-        _state["data"], next_step,
-        matched_bank=_state["matched_bank"],
-        matched_gl=_state["matched_gl"],
-        prior_matches=_state["matches"],
+        st["data"], next_step,
+        matched_bank=st["matched_bank"],
+        matched_gl=st["matched_gl"],
+        prior_matches=st["matches"],
     )
 
     if "error" in result:
         return jsonify(result)
 
-    _state["matches"].extend(result["new_matches"])
-    _state["audit_log"].extend(result["new_audit"])
-    _state["matched_bank"] = set(result["matched_bank"])
-    _state["matched_gl"] = set(result["matched_gl"])
-    _state["rec_report"] = result["rec_report"]
-    _state["summary"] = result["summary"]
-    _state["current_step"] = next_step
+    st["matches"].extend(result["new_matches"])
+    st["audit_log"].extend(result["new_audit"])
+    st["matched_bank"] = set(result["matched_bank"])
+    st["matched_gl"] = set(result["matched_gl"])
+    st["rec_report"] = result["rec_report"]
+    st["summary"] = result["summary"]
+    st["current_step"] = next_step
 
     return jsonify({
         "step": result["step"],
@@ -162,12 +182,13 @@ def api_reconcile_step():
 
 @app.route("/api/match/<match_id>/approve", methods=["POST"])
 def api_approve(match_id):
-    for m in _state["matches"]:
+    st = _get_state()
+    for m in st["matches"]:
         if m["id"] == match_id:
             m["status"] = "approved"
             m["approved_by"] = "reviewer"
             m["approved_at"] = datetime.now().isoformat()
-            _state["audit_log"].append({
+            st["audit_log"].append({
                 "timestamp": datetime.now().isoformat(),
                 "action": "match_approved",
                 "actor": "reviewer",
@@ -177,20 +198,21 @@ def api_approve(match_id):
                 "gl_ids": m["gl_ids"],
             })
             _rebuild_rec_report()
-            return jsonify({"success": True, "match": m, "summary": _state["summary"]})
+            return jsonify({"success": True, "match": m, "summary": st["summary"]})
     return jsonify({"error": "Not found"}), 404
 
 
 @app.route("/api/match/<match_id>/reject", methods=["POST"])
 def api_reject(match_id):
-    for m in _state["matches"]:
+    st = _get_state()
+    for m in st["matches"]:
         if m["id"] == match_id:
             m["status"] = "rejected"
             for bid in m["bank_ids"]:
-                _state["matched_bank"].discard(bid)
+                st["matched_bank"].discard(bid)
             for gid in m["gl_ids"]:
-                _state["matched_gl"].discard(gid)
-            _state["audit_log"].append({
+                st["matched_gl"].discard(gid)
+            st["audit_log"].append({
                 "timestamp": datetime.now().isoformat(),
                 "action": "match_rejected",
                 "actor": "reviewer",
@@ -200,25 +222,26 @@ def api_reject(match_id):
                 "gl_ids": m["gl_ids"],
             })
             _rebuild_rec_report()
-            return jsonify({"success": True, "match": m, "summary": _state["summary"]})
+            return jsonify({"success": True, "match": m, "summary": st["summary"]})
     return jsonify({"error": "Not found"}), 404
 
 
 @app.route("/api/match/bulk-approve", methods=["POST"])
 def api_bulk_approve():
     """Approve multiple matches at once."""
+    st = _get_state()
     data = request.get_json()
     match_ids = data.get("match_ids", [])
     now = datetime.now().isoformat()
     approved = []
 
-    for m in _state["matches"]:
+    for m in st["matches"]:
         if m["id"] in match_ids and m["status"] in ("pending", "exception"):
             m["status"] = "approved"
             m["approved_by"] = "reviewer"
             m["approved_at"] = now
             approved.append(m["id"])
-            _state["audit_log"].append({
+            st["audit_log"].append({
                 "timestamp": now,
                 "action": "match_approved",
                 "actor": "reviewer",
@@ -229,24 +252,27 @@ def api_bulk_approve():
             })
 
     _rebuild_rec_report()
-    return jsonify({"success": True, "approved": approved, "count": len(approved), "summary": _state["summary"]})
+    return jsonify({"success": True, "approved": approved, "count": len(approved), "summary": st["summary"]})
 
 
 @app.route("/api/rec-report")
 def api_rec_report():
-    return jsonify(_state["rec_report"] or {})
+    st = _get_state()
+    return jsonify(st["rec_report"] or {})
 
 
 @app.route("/api/audit-log")
 def api_audit_log():
-    return jsonify(_state["audit_log"])
+    st = _get_state()
+    return jsonify(st["audit_log"])
 
 
 @app.route("/api/export")
 def api_export():
     """Download formatted bank reconciliation report (HTML or CSV)."""
     fmt = request.args.get("format", "html").lower()
-    r = _state.get("rec_report")
+    st = _get_state()
+    r = st.get("rec_report")
     if not r:
         return jsonify({"error": "Run reconciliation first."}), 400
 
@@ -254,8 +280,8 @@ def api_export():
         return _export_csv(r)
     # Fall through to HTML export
 
-    bs = _state["data"]["bank_statement"]
-    s = _state["summary"]
+    bs = st["data"]["bank_statement"]
+    s = st["summary"]
 
     def fmt(n):
         return f"${abs(n):,.2f}" if n >= 0 else f"(${abs(n):,.2f})"
@@ -345,12 +371,13 @@ Built by Jon Roth — jonroth@getledger.net
 
 def _export_csv(r):
     """Generate CSV export with all reconciliation data."""
+    st = _get_state()
     output = io.StringIO()
     w = csv.writer(output)
-    bank_txns = _state["data"]["bank_transactions"]
-    gl_entries = _state["data"]["gl_entries"]
-    matches = _state["matches"]
-    resolutions = _state["resolutions"]
+    bank_txns = st["data"]["bank_transactions"]
+    gl_entries = st["data"]["gl_entries"]
+    matches = st["matches"]
+    resolutions = st["resolutions"]
 
     def get_match_status(txn_id, id_key):
         for m in matches:
@@ -441,11 +468,13 @@ def api_resolve():
     if not res_type:
         return jsonify({"error": "Resolution type is required."}), 400
 
+    st = _get_state()
+
     # Generate JE (or None for acknowledge_timing)
     je = generate_resolution_je(res_type, amount, memo, debit_account, credit_account)
 
-    _state["resolution_counter"] += 1
-    res_id = f"RES-{_state['resolution_counter']:03d}"
+    st["resolution_counter"] += 1
+    res_id = f"RES-{st['resolution_counter']:03d}"
 
     resolution = {
         "id": res_id,
@@ -456,10 +485,10 @@ def api_resolve():
         "journal_entry": je,
         "resolved_at": datetime.now().isoformat(),
     }
-    _state["resolutions"].append(resolution)
+    st["resolutions"].append(resolution)
 
     # Audit log
-    _state["audit_log"].append({
+    st["audit_log"].append({
         "timestamp": datetime.now().isoformat(),
         "action": "resolution_created",
         "actor": "reviewer",
@@ -476,21 +505,22 @@ def api_resolve():
     return jsonify({
         "success": True,
         "resolution": resolution,
-        "rec_report": _state["rec_report"],
-        "summary": _state["summary"],
-        "resolutions": _state["resolutions"],
+        "rec_report": st["rec_report"],
+        "summary": st["summary"],
+        "resolutions": st["resolutions"],
     })
 
 
 @app.route("/api/resolve/<res_id>", methods=["DELETE"])
 def api_undo_resolve(res_id):
     """Undo a resolution."""
-    idx = next((i for i, r in enumerate(_state["resolutions"]) if r["id"] == res_id), None)
+    st = _get_state()
+    idx = next((i for i, r in enumerate(st["resolutions"]) if r["id"] == res_id), None)
     if idx is None:
         return jsonify({"error": "Resolution not found."}), 404
-    removed = _state["resolutions"].pop(idx)
+    removed = st["resolutions"].pop(idx)
 
-    _state["audit_log"].append({
+    st["audit_log"].append({
         "timestamp": datetime.now().isoformat(),
         "action": "resolution_undone",
         "actor": "reviewer",
@@ -505,9 +535,9 @@ def api_undo_resolve(res_id):
 
     return jsonify({
         "success": True,
-        "rec_report": _state["rec_report"],
-        "summary": _state["summary"],
-        "resolutions": _state["resolutions"],
+        "rec_report": st["rec_report"],
+        "summary": st["summary"],
+        "resolutions": st["resolutions"],
     })
 
 
@@ -519,23 +549,25 @@ def api_manual_match():
     gl_ids = body.get("gl_ids", [])
     memo = body.get("memo", "Manual match by reviewer")
 
+    st = _get_state()
+
     if not bank_ids or not gl_ids:
         return jsonify({"error": "Both bank_ids and gl_ids are required."}), 400
 
     # Verify items exist and aren't already matched
     for bid in bank_ids:
-        if bid in _state["matched_bank"]:
+        if bid in st["matched_bank"]:
             return jsonify({"error": f"{bid} is already matched."}), 400
     for gid in gl_ids:
-        if gid in _state["matched_gl"]:
+        if gid in st["matched_gl"]:
             return jsonify({"error": f"{gid} is already matched."}), 400
 
     # Create manual match
-    match_num = len(_state["matches"]) + 1
+    match_num = len(st["matches"]) + 1
     match_id = f"MATCH-{match_num:03d}"
 
-    bank_txns = _state["data"]["bank_transactions"]
-    gl_entries = _state["data"]["gl_entries"]
+    bank_txns = st["data"]["bank_transactions"]
+    gl_entries = st["data"]["gl_entries"]
     b_items = [b for b in bank_txns if b["id"] in bank_ids]
     g_items = [g for g in gl_entries if g["id"] in gl_ids]
     bank_total = sum(abs(b["amount"]) for b in b_items)
@@ -556,13 +588,13 @@ def api_manual_match():
         "approved_at": datetime.now().isoformat(),
     }
 
-    _state["matches"].append(match)
+    st["matches"].append(match)
     for bid in bank_ids:
-        _state["matched_bank"].add(bid)
+        st["matched_bank"].add(bid)
     for gid in gl_ids:
-        _state["matched_gl"].add(gid)
+        st["matched_gl"].add(gid)
 
-    _state["audit_log"].append({
+    st["audit_log"].append({
         "timestamp": datetime.now().isoformat(),
         "action": "manual_match_created",
         "actor": "reviewer",
@@ -574,32 +606,34 @@ def api_manual_match():
     })
 
     _rebuild_rec_report()
-    if _state["resolutions"]:
+    if st["resolutions"]:
         _rebuild_rec_report_with_resolutions()
 
     return jsonify({
         "success": True,
         "match": match,
-        "matches": _state["matches"],
-        "matched_bank": list(_state["matched_bank"]),
-        "matched_gl": list(_state["matched_gl"]),
-        "rec_report": _state["rec_report"],
-        "summary": _state["summary"],
+        "matches": st["matches"],
+        "matched_bank": list(st["matched_bank"]),
+        "matched_gl": list(st["matched_gl"]),
+        "rec_report": st["rec_report"],
+        "summary": st["summary"],
     })
 
 
 @app.route("/api/resolutions")
 def api_resolutions():
-    return jsonify(_state["resolutions"])
+    st = _get_state()
+    return jsonify(st["resolutions"])
 
 
 @app.route("/api/je-report")
 def api_je_report():
     """Return journal entry report from resolutions."""
-    if not _state["resolutions"]:
+    st = _get_state()
+    if not st["resolutions"]:
         return jsonify({"entries": [], "summary": {}})
     # Count actionable items: fees + interest + NSF + amount mismatches + timing items
-    r = _state["rec_report"]
+    r = st["rec_report"]
     actionable = 0
     if r:
         actionable += len(r.get("book_side", {}).get("bank_fees", {}).get("items", []))
@@ -608,58 +642,49 @@ def api_je_report():
         actionable += len(r.get("bank_side", {}).get("outstanding_checks", {}).get("items", []))
         actionable += len(r.get("bank_side", {}).get("deposits_in_transit", {}).get("items", []))
         # Count amount mismatches
-        for m in _state["matches"]:
+        for m in st["matches"]:
             if m["status"] == "rejected":
                 continue
             b_ids = m["bank_ids"]
             g_ids = m["gl_ids"]
-            d = _state["data"]
+            d = st["data"]
             b_amt = sum(abs(b["amount"]) for b in d["bank_transactions"] if b["id"] in b_ids)
             g_amt = sum((g["debit"] or g["credit"]) for g in d["gl_entries"] if g["id"] in g_ids)
             if abs(b_amt - g_amt) > 0.01:
                 actionable += 1
-    report = build_je_report(_state["resolutions"], _state["matches"], _state["rec_report"], actionable)
+    report = build_je_report(st["resolutions"], st["matches"], st["rec_report"], actionable)
     return jsonify(report)
 
 
 def _rebuild_rec_report_with_resolutions():
     """Rebuild rec report, then apply resolution adjustments."""
-    d = _state["data"]
+    st = _get_state()
+    d = st["data"]
     base_report = build_rec_report(
         d["bank_statement"], d["book_balance"],
         d["bank_transactions"], d["gl_entries"],
-        _state["matches"], _state["matched_bank"], _state["matched_gl"],
+        st["matches"], st["matched_bank"], st["matched_gl"],
     )
     # Apply resolutions to adjust the report
-    resolutions = _state["resolutions"]
+    resolutions = st["resolutions"]
     resolved_ids = {r["item_id"] for r in resolutions} if resolutions else set()
     base_report["resolved_ids"] = list(resolved_ids)
 
     if resolutions:
-        # Fee/interest/NSF bookings don't change variance — the base rec report
-        # already accounts for them in the adjusted balance. Booking just means
-        # the GL entry has been created. The rec report is already correct.
-        #
-        # Only mismatch adjustments change the variance — they correct errors
-        # that the rec report cannot auto-adjust for.
-        # For each mismatch resolution, compute signed adjustment based on cash flow direction.
-        # The adjustment to adj_book depends on whether the bank transaction was an inflow or outflow:
-        #   Outflow (bank amt negative): GL overstated outflow → need to INCREASE cash → adj_book UP
-        #   Inflow (bank amt positive): GL overstated inflow → need to DECREASE cash → adj_book DOWN
         signed_adj = 0.0
         for res in resolutions:
             if res["type"] != "adjust_mismatch":
                 continue
             match_id = res.get("match_id", "")
-            m = next((x for x in _state["matches"] if x["id"] == match_id and x["status"] != "rejected"), None)
+            m = next((x for x in st["matches"] if x["id"] == match_id and x["status"] != "rejected"), None)
             if not m:
                 continue
             bank_items = [b for b in d["bank_transactions"] if b["id"] in m["bank_ids"]]
             gl_items = [g for g in d["gl_entries"] if g["id"] in m["gl_ids"]]
-            bank_raw = sum(b["amount"] for b in bank_items)  # signed: negative=outflow, positive=inflow
+            bank_raw = sum(b["amount"] for b in bank_items)
             bank_abs = abs(bank_raw)
             gl_amt = sum((g["debit"] or g["credit"]) for g in gl_items)
-            direction = -1 if bank_raw > 0 else 1  # outflows: +1 (increase cash), inflows: -1 (decrease cash)
+            direction = -1 if bank_raw > 0 else 1
             signed_adj += (gl_amt - bank_abs) * direction
 
         if abs(signed_adj) > 0.001:
@@ -669,18 +694,19 @@ def _rebuild_rec_report_with_resolutions():
             base_report["variance"] = round(base_report["bank_side"]["adjusted_balance"] - adj_book, 2)
             base_report["is_reconciled"] = abs(base_report["variance"]) < 0.01
 
-    _state["rec_report"] = base_report
-    _state["summary"] = build_summary(
+    st["rec_report"] = base_report
+    st["summary"] = build_summary(
         d["bank_transactions"], d["gl_entries"],
-        _state["matches"], _state["matched_bank"], _state["matched_gl"],
-        _state["rec_report"],
+        st["matches"], st["matched_bank"], st["matched_gl"],
+        st["rec_report"],
     )
 
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
-    global _state
-    _state = _fresh_state()
+    sid = session.get("sid")
+    if sid and sid in _sessions:
+        _sessions[sid] = _fresh_state()
     return jsonify({"success": True})
 
 
